@@ -105,7 +105,7 @@ def matmul_kernel(
 
         # Advance the ptrs to the next K block.
         c_ptrs += BLOCK_SIZE_K * stride_ck
-        d_ptrs += BLOCK_SIZE_K * stride_ck
+        d_ptrs += BLOCK_SIZE_K * stride_dk
 
 #    # You can fuse arbitrary activation functions here
 #    # while the accumulator is still in FP32!
@@ -125,10 +125,13 @@ def matmul_kernel(
 def matmul(A, B, C):
     # Check constraints.
     assert A.shape[1] == B.shape[0], "Incompatible dimensions"
+    assert B.shape[1] == C.shape[0], "Incompatible dimensions"
     assert A.is_contiguous(), "Matrix A must be contiguous"
     assert B.is_contiguous(), "Matrix B must be contiguous"
+    assert C.is_contiguous(), "Matrix C must be contiguous"
     M, K = A.shape
     K, N = B.shape
+    #N, K = C.shape
     # Allocates output.
     # C = torch.empty((M, N), device=A.device, dtype=A.dtype)
     D = torch.zeros((M, K), device=A.device, dtype=A.dtype)
