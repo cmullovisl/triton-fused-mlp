@@ -126,6 +126,7 @@ def matmul(A, B, C):
     # Check constraints.
     assert A.shape[1] == B.shape[0], "Incompatible dimensions"
     assert B.shape[1] == C.shape[0], "Incompatible dimensions"
+    assert A.shape[1] == C.shape[1], "Incompatible dimensions"
     assert A.is_contiguous(), "Matrix A must be contiguous"
     assert B.is_contiguous(), "Matrix B must be contiguous"
     assert C.is_contiguous(), "Matrix C must be contiguous"
@@ -141,7 +142,19 @@ def matmul(A, B, C):
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
     )
 
-    matmul_kernel[grid](
+    kernel = matmul_kernel[grid]
+    kernel(
+        A, B, C, D,
+        M, N, K,
+        A.stride(0), A.stride(1),
+        B.stride(0), B.stride(1),
+        C.stride(0), C.stride(1),
+        D.stride(0), D.stride(1),
+        ACTIVATION=None,
+    )
+    # autotune executes the kernel multiple times, thus adding onto `D` every time
+    D.zero_()
+    kernel(
         A, B, C, D,
         M, N, K,
         A.stride(0), A.stride(1),
