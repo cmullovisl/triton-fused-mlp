@@ -26,7 +26,7 @@ import triton.language as tl
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
-    a_ptr, b_ptr, c_ptr,
+    a_ptr, b_ptr, c_ptr, d_ptr,
     # Matrix dimensions
     M, N, K,
     # The stride variables represent how much to increase the ptr by when moving by 1
@@ -34,7 +34,8 @@ def matmul_kernel(
     # by to get the element one row down (A has M rows).
     stride_am, stride_ak,
     stride_bk, stride_bn,
-    stride_cm, stride_cn,
+    stride_cn, stride_ck,
+    stride_dm, stride_dk,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -86,22 +87,42 @@ def matmul_kernel(
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_dm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    c_ptrs = c_ptr + (offs_cn[:, None] * stride_cn + offs_k[None, :] * stride_ck)
+    d_ptrs = d_ptr + (offs_dm[:, None] * stride_dm + offs_k[None, :] * stride_dk)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # c = C[n : n+BLOCK_SIZE_N, k : k+BLOCK_SIZE_K]
+        #c = tl.load(c_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        c = tl.load(c_ptrs)
+        # M x N @ N x K
+        accumulator2 = tl.dot(accumulator, c)
+
+        # D[m : m+BLOCK_SIZE_M, k : k+BLOCK_SIZE_K] += acc2
+        #tl.atomic_add(d_ptrs, accumulator2, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K)
+        tl.atomic_add(d_ptrs, accumulator2)
+
+        # Advance the ptrs to the next K block.
+        c_ptrs += BLOCK_SIZE_K * stride_ck
+        d_ptrs += BLOCK_SIZE_K * stride_ck
+
 #    # You can fuse arbitrary activation functions here
 #    # while the accumulator is still in FP32!
 #    if ACTIVATION == "leaky_relu":
 #        accumulator = leaky_relu(accumulator)
-    c = accumulator.to(tl.float32)  # XXX tl.float16
+#    c = accumulator.to(tl.float32)  # XXX tl.float16
+#
+#    # -----------------------------------------------------------
+#    # Write back the block of the output matrix C with masks.
+#    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+#    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+#    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+#    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+#    tl.store(c_ptrs, c, mask=c_mask)
 
-    # -----------------------------------------------------------
-    # Write back the block of the output matrix C with masks.
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
 
-
-def matmul(A, B):
+def matmul(A, B, C):
     # Check constraints.
     assert A.shape[1] == B.shape[0], "Incompatible dimensions"
     assert A.is_contiguous(), "Matrix A must be contiguous"
@@ -109,7 +130,8 @@ def matmul(A, B):
     M, K = A.shape
     K, N = B.shape
     # Allocates output.
-    C = torch.empty((M, N), device=A.device, dtype=A.dtype)
+    # C = torch.empty((M, N), device=A.device, dtype=A.dtype)
+    D = torch.zeros((M, K), device=A.device, dtype=A.dtype)
 
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (
@@ -117,15 +139,16 @@ def matmul(A, B):
     )
 
     matmul_kernel[grid](
-        A, B, C,
+        A, B, C, D,
         M, N, K,
         A.stride(0), A.stride(1),
         B.stride(0), B.stride(1),
         C.stride(0), C.stride(1),
+        D.stride(0), D.stride(1),
         ACTIVATION=None,
     )
 
-    return C
+    return D
 
 
 if __name__ == "__main__":
@@ -135,9 +158,10 @@ if __name__ == "__main__":
     # torch.manual_seed(12321)
     A = torch.randn((bsz, size), device='cuda', dtype=torch.float32)
     B = torch.randn((size, size * 4), device='cuda', dtype=torch.float32)
+    C = torch.randn((size * 4, size), device='cuda', dtype=torch.float32)
 
-    triton_output = matmul(A, B)
-    torch_output = torch.matmul(A, B)
+    triton_output = matmul(A, B, C)
+    torch_output = torch.matmul(torch.matmul(A, B), C)
     print(f"triton_output={triton_output}")
     print(f"torch_output={torch_output}")
     if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
