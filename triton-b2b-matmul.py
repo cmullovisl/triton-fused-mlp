@@ -22,6 +22,7 @@ import triton.language as tl
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
     ],
     key=['M', 'N', 'K'],
+    reset_to_zero=['d_ptr'],
 )
 @triton.jit
 def matmul_kernel(
@@ -107,20 +108,6 @@ def matmul_kernel(
         c_ptrs += BLOCK_SIZE_K * stride_ck
         d_ptrs += BLOCK_SIZE_K * stride_dk
 
-#    # You can fuse arbitrary activation functions here
-#    # while the accumulator is still in FP32!
-#    if ACTIVATION == "leaky_relu":
-#        accumulator = leaky_relu(accumulator)
-#    c = accumulator.to(tl.float32)  # XXX tl.float16
-#
-#    # -----------------------------------------------------------
-#    # Write back the block of the output matrix C with masks.
-#    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-#    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-#    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-#    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-#    tl.store(c_ptrs, c, mask=c_mask)
-
 
 def matmul(A, B, C):
     # Check constraints.
@@ -142,19 +129,7 @@ def matmul(A, B, C):
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
     )
 
-    kernel = matmul_kernel[grid]
-    kernel(
-        A, B, C, D,
-        M, N, K,
-        A.stride(0), A.stride(1),
-        B.stride(0), B.stride(1),
-        C.stride(0), C.stride(1),
-        D.stride(0), D.stride(1),
-        ACTIVATION=None,
-    )
-    # autotune executes the kernel multiple times, thus adding onto `D` every time
-    D.zero_()
-    kernel(
+    matmul_kernel[grid](
         A, B, C, D,
         M, N, K,
         A.stride(0), A.stride(1),
