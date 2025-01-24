@@ -6,3 +6,12 @@ operator (also see the [CUDA Programming Guide](https://docs.nvidia.com/cuda/cud
 
 In other words, the `atomic_add` operator allows us to accumulate result blocks in the
 back-to-back matrix multiplication directly in global memory (see [triton-b2b-matmul.py](./triton-b2b-matmul.py#L105)).
+
+This implementation reduces memory usage, at the cost of additional memory reads and writes.
+The performance strongly depends on the implementation of the `atomic_add`
+operator, which might strongly differ between different GPU architectures.
+
+For an explanation of the basic block-based Triton matrix multiplication (which
+this implementation is based on) see the [Triton tutorial page](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html).
+
+For a sequential, but more readable implementation of the fused back-to-back matrix multiplication in Python/Pytorch, see [ref.py](./ref.py).
